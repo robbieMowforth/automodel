@@ -1,8 +1,8 @@
 # automodel
 Hello, welcome to the README! Made by Robbie Mowforth
 
-DOWNLOADING UNDERSTANDING SOCIETY DATA
-############################################################################################################
+# DOWNLOADING UNDERSTANDING SOCIETY DATA
+
 Since the Understanding Society data files are so large, a manaual download of then is going to be required.
 
 To access the Wave 2 and 3 survey data, please go to the following link: https://beta.ukdataservice.ac.uk/datacatalogue/studies/study?id=6614
@@ -26,8 +26,8 @@ Once downloaded, follow this prodcedure:
 
 Once completed, you should have all of the data to complete a full run of the code
 
-RUNNING THE CODE
-############################################################################################################
+# RUNNING THE CODE
+
 To run the code correctly, please do the following:
 
 1. open up the "runningexample.Rproj" file in R Studio (can be done by clicking on the file)
@@ -36,12 +36,12 @@ To run the code correctly, please do the following:
 
 3. Navigate into the file "rCode" directory (if this directory can't be seen, try going up a level in the files tab by clicking the two dots (..) at the top of the navigator)
 
-4. Click of the R script "mainRun.R"
+4. Click of the R script "presentation.R"
 
-You then should be able to run though all the code using mainRun.R
+In this script you can see a demostration of how to install package and run it
 
-VIEWING AUTOMODEL FUNCTION
-############################################################################################################
+# VIEWING AUTOMODEL FUNCTION
+
 To view the code behind the autoModel fucntion.
 
 1. Navigate to the main directory (as set by runningexample.Rproj)
