@@ -1,0 +1,26 @@
+library(automodel)
+library(automodel)
+setwd("D:/Documents/uniWork/MA317/groupWork")
+data = read.csv("Life_Expectancy_Data1.csv")
+life_exp.r = autoModel("SP.DYN.LE00.IN", data)
+?autoModel()
+#'
+#' @param x A description of the parameter 'x'. The
+#'   description can span multiple lines.
+#' @param y A description of the parameter 'y'.
+#'
+#' @export
+#'
+#' @examples
+#' add_numbers(1, 2) ## returns 3
+#'
+library(devtools)
+document()
+document()
+document()
+document()
+document()
+document()
+document()
+document()
+document()

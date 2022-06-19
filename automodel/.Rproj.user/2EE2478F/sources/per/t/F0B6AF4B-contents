@@ -1,0 +1,894 @@
+#' autoModel
+#'
+#' autoModel will attempt to model a variable from a given data-set using various different analytical techniques.
+#'     It includes various cleaning & transforming procedures, K-Means model, kNN model, CART model, Ordinary Linear Regression Model,
+#'         Elastic Net Regression Model.
+#'
+#' @importFrom dplyr select all_of
+#' @importFrom stringr str_remove str_replace
+#' @importFrom rlang is_empty
+#' @import mice
+#' @importFrom caret dummyVars
+#' @importFrom glmnet cv.glmnet
+#' @import Matrix
+#' @importFrom broom tidy
+#' @importFrom car vif
+#' @importFrom class knn
+#' @importFrom rpart rpart rpart.control
+#' @importFrom stats AIC coef cor kmeans lm na.omit predict princomp runif sd
+#'
+#' @param predictVar The name of the variable that is to be predicted/the name of the dependent variable
+#' @param data The data-set of all the predictor variables and the dependent variable
+#' @param naPercent This is the percentage amount of NA values allowed in a predictor variable.
+#'     If the predictor variable have naPercent percent or more of their values as NA/missing, the predictor variable is removed
+#' @param cartSplit The amount of observations needed for a new threshold/node to be generated in a CART model.
+#'     CART is used to impute missing values and to generate a prediction model of the data within the code.
+#' @param impFlag Flag to tell the function if we are wanting to impute the missing values instead of preforming a list-wise deletion.
+#'     If TRUE, a single CART imputation is done to impute the missing values.
+#' @param randomSeed To make results reproducible, we must set a random seed within the function.
+#'     randomSeed can be set to any integer in the range -2147483647 to 2147483647 (2147483647 is the maximum integer allowed in R).
+#' @param catLevels Decides on how many unique values/levels  a variable needs to be considered as a factor/categorical variable when modelling.
+#'     If a variable has less than or equal to catLevels levels, the variable gets encoded as a factor.
+#' @param obsPerLevel How many observations are needed of a level in a categorical/factor variable.
+#'     If the level in the variable has less than obsPerLevel observations, all observations of this level are removed from the data-set
+#' @param clusterAmount Sets the amount of clusters/centroids to be used in K-Means modelling.
+#'     Our K-Means model has clusterAmount clusters.
+#' @param corrConfLevel The cuttoff point of when a correlation between two predictor variables is deemed to large/ will cause multicolinearaity in a model.
+#'     If the absolute value of the correlation coefficient between two predictor variables is greater than corrConfLevel, these variables will be considered for deletion.
+#' @param PCAFlag Flag that tells the automodel function to preform PCA on the data-set.
+#'  If TRUE, PCA using the co-variance matrix and eigenvalue decomposition is preformed.
+#' @param pcPercent This sets the needed amount of variance explained by the reduced principal component (PC) data-set.
+#'     When preforming dimension reduction, we keep the smallest amount of PC's that describe pcPercent of the variance in the data-set.
+#' @param testPercent The proportion of observations after transformation within the testing data.
+#'     When preforming our Train Test split on our data, we set testPercent percent of our observations as our testing data and 1 - testPercent as our training data.
+#'     Our training data must maintain variance in all predictor variables and therefore the splitting process iterates until a correct split can be found.
+#'     If randomSeed is set, it only evaluates the Train Test split associated with the seed once.
+#'     A user can set testPercent to -1 if only one observation should be tested.
+#' @param kNNCount The number of neighbors that are considered for each test observation in the kNN model.
+#'     Each test observation considers kNNCount neighbors to predict the dependent variable for the observation.
+#' @param vifSelectionLevel We will be removing variables from the Ordinary Linear Regression model in order of their VIF score until all variables have a VIF score equal to or below vifSelectionLevel.
+#' @param modelSigLevel To refine our Ordinary Linear Regression Model we remove variables based on their statistical significance, we use modelSigLevel to decide the minimum confidence level that each variable in the model needs to satisfy.
+#'     Each model needs to be considered significant at the modelSigLevel confidence level.
+#' @param elasticCount When fitting our elastic net models, we need to fit models for different values of alpha (which takes values between 0 and 1).
+#'     elasticCount decides how many different values of alpha we try and the different values are incremented equally based on the value of elasticCount
+#'
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' #reading in an example csv as our data
+#' data = read.csv("data.csv")
+#'
+#' #running the autoModel function and setting the results to the variable 'data.results'
+#' data.results = autoModel(predictVar = "Variable", data = data)
+#' }
+autoModel = function(
+  predictVar,
+  data,
+  naPercent = 0.2,
+  cartSplit = 20,
+  impFlag = FALSE,
+  randomSeed = NULL,
+  catLevels = 15,
+  obsPerLevel = 5,
+  clusterAmount = ifelse(length(unique(data[[predictVar]])) <= catLevels, length(unique(data[[predictVar]])), catLevels),
+  corrConfLevel = 0.8,
+  PCAFlag = FALSE,
+  pcPercent = 0.95,
+  testPercent = 0.25,
+  kNNCount = round(sqrt(nrow(data)),0),
+  vifSelectionLevel = 10,
+  modelSigLevel = 0.95,
+  elasticCount = 10
+) {
+  #----Functions needed for initial analysis----
+
+  #After some deletions, we have variables which now have now have 0 variance (all values in column are the same)
+  #This will be wrapped in a function as we will need to repeat this step later
+  #This function is used within the autoModel function multiple times to remove columns with no variance
+  #A column with no variance for example is [1,1,1,1,1] (all values the same)
+  var0Remove = function(dataset,print = T) {
+
+    #get all variances and find names of all attributes with NA variance (as.numeric() is included in-case variable is a factor)
+    naSdRM = names(which(sapply(na.omit(dataset),function(x) sd(as.numeric(x))==0 )))
+
+    #This checks if we want to print the results of this test, prints results by default
+    if (print){
+      print("----------Variance 0 Check----------")
+      print(paste(length(naSdRM),"variables removed since their new variance was 0"))
+      print(naSdRM)
+
+    }
+
+    #Remove the values
+    dataset = dataset[,!(names(dataset) %in% naSdRM)]
+
+    return(dataset)
+  }
+  #----
+
+  ###START###
+  print("----------Initial Checks----------")
+  #as a added feature, we can add how long the function ran for, we start the timer here
+  timer = proc.time()
+
+  #First to fool proof the data, we need to treat as a data-frame
+  data = as.data.frame(data)
+
+  #next, we need to do a quick NA transform where blank string is coded to 'NA'
+  data[data == ""] = NA
+
+  #return the count of na values
+  print(paste(sum(is.na(data))," NA cells were found across the entire dataset (",
+              round((sum(is.na(data))/(nrow(data) * ncol(data)))*100,2),"% of data as NA)",sep=""))
+
+  #If the dependent variable is a factor, this prints out a legend to follow for the results
+  if (class(select(data,all_of(predictVar))[,1]) == "factor"){
+    print("----------Dependant Variable Legend (Use to understand cluster models)----------")
+    factorNames = levels(select(data,all_of(predictVar))[,1])
+    facLegend = as.data.frame(factorNames)
+    facLegend$values = as.numeric(unique(select(data,all_of(predictVar))[,1]))
+    print(facLegend)
+  }
+
+  #This method finds all the columns with non-numeric data and re-codes them into dummy columns
+  print("----------Data Type Checks----------")
+  badDataType = sapply(data,function(x) typeof(x) %in% c("double","integer")  )
+  badTRM = names(which(badDataType == F))
+  print(paste(length(badTRM), "variables recoded since all their entries aren't numeric or NA"),sep=" ")
+  print("NOTE: algorithim recodes categorical data alphabetically e.g (female = 1, male = 2)")
+  print(badTRM)
+
+  #The below loop re-codes a column which has at least one string entry
+  #This works by identifying each unique level of the column, assigning them an integer based on
+  #alphabetical order then assign these values as the integers.
+  #e.g a column containing: "male, "female", "female", NA
+  #will be re-coded into: "2", "1", "1", NA
+  for (i in badTRM) { data[[i]] = as.factor(data[[i]]) }
+
+  #We remove all rows where there's a NA in the predictor variable, this is a pair-wise deletion
+  #we do this here so that we potentially keep more variables in the 'Low Data Removal' step
+  #A user can be recommended to manually remove these rows to keep them for potential test cases
+  data.rm = data[!is.na(data[[predictVar]]),]
+
+  #get the count of NA's per variable
+  print("----------Low Data Removal----------")
+  naCount = sapply(data.rm,function(x) sum(is.na(x)))
+
+  #if we don't do this step, when we do a listwise deletion we will most likely remove all rows
+  naRM = names(which(naCount >= nrow(data.rm)*naPercent)) #usage of user input here
+  print(paste(length(naRM), "variables removed since they had >= 'naPercent' (default 20%) NA values"),sep=" ")
+  print(naRM)
+
+  #remove the said attributes from data
+  data.rm = data.rm[,!(names(data.rm) %in% naRM)]
+
+  #before potentially running imputation, since we impute with CART,
+  #we want to add in the user input for how many observations are needed for a node split
+  rpart.control(minsplit = cartSplit)
+
+  if (impFlag){
+
+    #creating the imputation
+    print("----------CART Single Imputation----------")
+
+    #a quirk of the function means that we can't have a variable name as 'next', which w2indresp has, since it breaks a loop
+    #(it thinks its a function call). We need to rename all variables called 'next' as 'nextVar'
+    names(data.rm)[names(data.rm) == "next"] = "nextVar"
+
+    #Since we impute before correlation checks, the data used may be a computationally singular matrix. Therefore the normal regression method
+    #of MICE won't work, therefore we need to use the 'CART' method which is classification and regression trees.
+    #Since using multiple imputations can get quite hard, we use a single imputation created over multiple iterations.
+    data.imp = mice(data.rm,
+                    #quirk of the MICE function, doesn't accept a seed of NULL, therefore we generate a random int if randomSeed is NULL
+                    seed = ifelse(is.null(randomSeed),round(runif(1, min=1, max=100000),0),randomSeed),
+                    m = 1,
+                    maxit = 5,
+                    method = "cart",
+                    threshold = 2) #This threshold means we keep in all the highly correlated variables
+
+    #This makes a data-set with the respective NA values computed
+    data.imp.data = complete(data.imp,1)
+
+    #rename the data-set so that we can use it going forward in the code
+    data.recode = data.imp.data
+  } else{
+    #list-wise deletion of all dummy NA's
+    data.recode = na.omit(data.rm)
+  }
+
+  #now we need to do a check for the observation to variable ratio since we may have
+  #low observations after list-wise deletion
+  if (nrow(data.recode)/ncol(data.recode) < 5){
+    stop(paste("Observation to Variable ratio of (",round(nrow(data.recode)/ncol(data.recode),2),") is less than 5 after List-Wise Deletion (or has always been if using Multiple Imputation). Consider the following:",
+                  "\n-Increase the function variable: 'naPercent'\n-Run missing value imputation by setting impFlag = TRUE\n-Use less variables\n-Gather more observations",sep=""))
+
+  }
+
+  #now we need to encode our continuous and categorical variables
+  #first we need to encode categorical as factors and normalize the continuous variables
+  #This loop will change variables with less than 'catLevels' levels into a factor otherwise normalize
+  #We also don't factorize the predictor variable since this will cause issues when making dummies
+  #we also don't scale the predictor variable IF it's categorical (would normally be a factor)
+  for (i in 1:length(data.recode)) {
+
+    #This check is needed if the DV is a factor or the variable has more levels than catLevels, turns into numerical
+    if (names(data.recode)[i] == predictVar | length(unique(data.recode[,i])) > catLevels) {
+      data.recode[,i] = as.numeric(data.recode[,i])
+    }
+
+    #This recodes a column into a factor
+    if (length(unique(data.recode[,i])) <= catLevels & names(data.recode)[i] != predictVar) {
+      data.recode[,i] = as.factor(data.recode[,i])
+    }
+
+  }
+
+  #loop goes though each columns, makes a freq table of the levels
+  print("----------Low Level Removal----------")
+  print("If a level is removed from a variable you wish to keep, reccomended to manually merge levels toegther and re-run")
+
+  #needed for console outputs
+  varCounter = 0
+  levelCounter = 0
+  obsCounter = 0
+
+  #start of loop
+  for (i in names(data.recode)) {
+
+    #checks if variable is a factor that is does have at least 1 level with less than obsPerLevel observations
+    if (is.factor(data.recode[[i]]) & !is_empty(names(which(table(data.recode[[i]])<obsPerLevel)))) {
+
+      varCounter = varCounter + 1
+
+      #looping though the freq table to find levels with less than obsPerLevel observations
+      for (j in names(which(table(data.recode[[i]])<obsPerLevel)) ) {
+
+        #console output
+        print(paste("level",j,"in",i,"removed,",table(data.recode[[i]])[j],"observations found"))
+
+        #before removing, we need to update the total obs removed count
+        obsCounter = obsCounter + ifelse(!is.na(table(data.recode[[i]])[j]),table(data.recode[[i]])[j],0)
+
+        #removing the level, list-wise deletion
+        data.recode = data.recode[data.recode[[i]] != j,]
+
+        #counting the number of levels
+        levelCounter = levelCounter + 1
+
+      }
+
+    }
+
+  }
+
+  #overall results from procedure
+  print(paste(levelCounter,"total levels removed from",varCounter,"different variables. In total",obsCounter,"observations deleted"))
+
+  #Check here since we may or removed enough observations to deem the ratio poor
+  if (nrow(data.recode)/ncol(data.recode) < 5){
+    stop(paste("Observation to Variable ratio of ",round(nrow(data.recode)/ncol(data.recode),2)," is less than 5 after Low Level Removal. Consider the following",
+               "\n-Increase the  function variable: 'naPercent'\n-Lower the value of function variable: 'obsPerLevel'\n-Use less variables\n-Gather more observations",sep=""))
+
+  }
+
+  #use the function to clean 0 var variables
+  data.recode.2 = var0Remove(data.recode)
+
+  #Here we need to check if the dependent variable is still apart of the data (if it's not it's because the DV had no variance)
+  if (sum(names(data.recode.2) == predictVar) == 0){
+    paste("Dependant Variable no longer has variance (all values the same). Consider the following:",
+          "\n-Lower the value of function variable: 'obsPerLevel'\n-Gather more observations for the DV\n-Attempt to group similar DV values to produce more observations per level",sep="")
+  }
+
+  #There are a few more steps before modelling, however we shouldn't apply these next steps to the DV, therefore we split it out
+  #set the Dependent Variable
+  y = select(data.recode.2,all_of(predictVar))
+
+  #all the rest/all the predictor variables
+  data.recode.2 = select(data.recode.2,-all_of(predictVar))
+
+  #next we need to encode the categorical/factor variables as multiple columns of 0's and 1's to work with a matrix form
+  #the above step makes k-1 columns if a categorical variable has k levels (thanks to fullRank = T)
+  print("----------Dummy Variables----------")
+  dmy = dummyVars(" ~ .", data = data.recode.2, fullRank = T)
+  data.recode.dmy = data.frame(predict(dmy, newdata = data.recode.2))
+  print(paste("predictor variable count went from",ncol(data.recode.2),"to",ncol(data.recode.dmy)))
+
+  #After encoding the dummies, we need to remove 0 var variables again since some of the levels described by the factors in the data
+  #may no longer exist (which is what the dummy function uses to dumm-ize the data) therefore we end up with dummy columns of no variance
+  data.clus = var0Remove(data.recode.dmy)
+
+  ###K-Means###
+  #we next do K-Means since removing correlated variables and scaling negatively effect this model
+  #we use all the data (both train and test) excluding the dependant variable
+  print("----------K-Means----------")
+  set.seed(randomSeed) #need to set random seed here to ensure same results if set
+  kmClus = kmeans(as.matrix(data.clus),clusterAmount,1000)
+
+  #Tell user how many clusters have been made
+  print(paste(clusterAmount,"clusters have been made for K-Means"))
+
+  #generate the results table as a data.frame
+  resultsTable = as.data.frame(table(kmClus$cluster,as.matrix(y)))
+  names(resultsTable) = c("cluster","level","freq")
+  resultsTable$cluster = as.numeric(levels(resultsTable$cluster))[resultsTable$cluster] #needed to maintain levels
+  resultsTable$level = as.numeric(levels(resultsTable$level))[resultsTable$level]
+  resultsTable = resultsTable[order(resultsTable$cluster,resultsTable$level),]
+  resultsTable = resultsTable[order(resultsTable$cluster,resultsTable$level),]
+
+  #print table
+  print("K-Means results as a table, the max value in each row is a simple way to define which cluster represents which variable (ties can be decided by the user)")
+  print(table(kmClus$cluster,as.matrix(y)))
+
+  #Here we are calculating the accuracy of the clusters, how a cluster is identified is:
+  #Whatever the current cluster has the most values of included within, it's defined as the cluster of the Y variable.
+  #example:         y.var1   y.var2
+  #example: clus1 |   100  |   50   |
+  #example: clus1 is defined as the cluster for y.var1
+  clusterIden = 0
+  for (i in unique(resultsTable$cluster)){
+    temp = subset(resultsTable,resultsTable$cluster == i)
+    clusterIden = clusterIden + max(temp$freq)
+  }
+
+  #report back the in-cluster and between cluster SSR, along with each clusters size
+  print("CAUTION: Be careful comparing the MSE of this classification model to the regression models")
+  print(paste("Cluster ",1:length(kmClus$withinss),": Within MSE ",round(kmClus$withinss/kmClus$size,0),", Size ",kmClus$size,sep=""))
+  print(paste("Total between cluster MSE: ",round(kmClus$betweenss/length(kmClus$cluster),0),", Total within cluster MSE: ",round(kmClus$tot.withinss/length(kmClus$cluster),0),sep=""))
+
+  #calculate the accuracy of the k-means using the sum of those maxes divided by total sum
+  print(paste("The K-Means model predicts exactly with an accuracy of",round(clusterIden/sum(resultsTable$freq),4),sep=" "))
+
+  #Correlation Checks
+  print("----------Correlation Checks----------")
+
+  #creating a version of the data to remove the vars from
+  data.corr.rm = data.clus
+
+  #first, we make our initial correlation matrix
+  corr = round(cor(data.corr.rm),4)
+  diag(corr) = 0
+
+  #we then make a version which is just the lower tri correlation coefs
+  corrLower = corr
+  corrLower[upper.tri(corrLower)] = 0
+
+  #to preform our correlation checks, we do a loop that checks for the variable which has the most correlation coefs above the 'corrConfLevel' level
+  #to start it off we check if there is at all any correlation between the variables
+  corrCountUp = as.data.frame(corrLower[,apply(corrLower, 2, function(x) any(abs(x) > corrConfLevel))])
+
+  #then append the answer in a list like so, this makes our while loop initialize
+  #if length(corrCountUp) is initially 0, then after the below command, length(corrCountUp) is 1
+  #if length(corrCountUp) is 1+, then after the below command, length(corrCountUp) is 2
+  corrCountUp = c(corrCountUp,1)
+
+  #beginning of the selection loop
+  iterC = 0
+  while (length(corrCountUp)-1 > 0) {
+    #0.80-1.00: very strong correlation, by default we remove correlations above the 0.8 level (this sets corrConfLevel as 0.8)
+    #to deal with transitive co-linearity, we remove variables in order of the amount of coefficients that have above the 'corrConfLevel' level.
+    varsRemoval = as.data.frame(corr[,apply(corr, 2, function(x) any(abs(x) > corrConfLevel))])
+
+    #To deal with the non-transitive correlations, we sum the results from counting:
+      #correlation coefs on the full correlation matrix
+      #correlation coefs on the lower tri correlation matrix
+    #This gives us a results which finds variables with the most correlations and discriminates against variables that come
+    #earlier in the dataset (which allows the user to have some manual control over what variables are kept)
+
+    #next, we get varsRemoval but with the upper tri removed
+    varsRemovalUp = as.data.frame(corrLower[,apply(corrLower, 2, function(x) any(abs(x) > corrConfLevel))])
+
+    #we need this check for removing the last coefficient, quirk of the functions
+    if (ncol(varsRemovalUp) == 1){
+      #what we are doing here is getting the name of the column which has the correlation coef above 0.8 and applying it to varsRemovalUp
+      names(varsRemovalUp) = names(apply(corrLower, 2, function(x) any(abs(x) > corrConfLevel))[apply(corrLower, 2, function(x) any(abs(x) > corrConfLevel)) == TRUE])
+    }
+
+    #We then get the amount of coefficients that are above the 'corrConfLevel' level per variable (Keep in mind, we discriminate against
+    #variables that are at the start of the data-set to provide users a manual way to choose variables in this section,
+    #which is moving them to the end of the data-set)
+    corrCount = apply(varsRemoval, 2, function(x) sum(abs(x) > corrConfLevel))
+
+    #do the same for varsRemovalUp
+    corrCountUp = apply(varsRemovalUp, 2, function(x) sum(abs(x) > corrConfLevel))
+
+    #now we sum corrCount and corrCountUp to get our final counts/scores for correlated variables
+    for (i in names(corrCountUp)){
+      if (i %in% names(corrCount)){
+        corrCountUp[[i]] = corrCountUp[[i]] + corrCount[[i]]
+      }
+    }
+
+    #this is the variable to be removed (if there are multiple at the max value, we select the variable that comes first)
+    colRemoved = corrCountUp[corrCountUp == max(corrCountUp)][1]
+
+    #remove this column from the data.clus.rm, full correlation matrix and lower tri correlation matrix
+    data.corr.rm = data.corr.rm[,colnames(data.corr.rm) != names(colRemoved)]
+    corr = corr[,colnames(corr) != names(colRemoved)]
+    corrLower = corrLower[,colnames(corrLower) != names(colRemoved)]
+
+    #progress marker
+    iterC = iterC + 1
+    print(paste(names(colRemoved),"removed, correlated with",corrCount[[names(colRemoved)]], "other variable(s)"))
+
+    #to cut run-time, we only process a new correlation matrix when all variables with the same amount of
+    #highly correlated coefficients in the full+lower (example: all variables with 4 highly correlated coefficients are
+    #removed, we re-process the matrix to calculate all those with 3 and below)
+    #We also don't process the matrix after we have removed the last variable
+    if (length(corrCountUp[corrCountUp == max(corrCountUp)]) == 1 & ncol(varsRemovalUp) != 1) {
+      corr = round(cor(data.corr.rm),4)
+      diag(corr) = 0
+      corrLower = corr
+      corrLower[upper.tri(corrLower)] = 0
+    }
+
+  }
+
+  #printing the results
+  print(paste(iterC,"variables removed since they had high correlation coefs"))
+
+  #This re-codes a column into a scalar (scales the continuous variables)
+  for (i in names(data.corr.rm)) {
+
+    #this scales continuous variables, needed mainly for regression models
+    #we can use 2 here since all factor variables will of been encoded as dummy columns by this stage (1, 0 columns)
+    if (length(unique(data.corr.rm[[i]])) > 2 ) {
+      data.corr.rm[[i]] = as.vector(scale(data.corr.rm[[i]]))
+    }
+
+  }
+
+  #since this is our last data transform, we should give the user a message stating that the clean data at this point is returned at this point
+  print("The final cleaned dataset has been completed at this stage and is stored under the name 'cleanData' in the return object")
+
+  #finally, we now have a set of predictor variables ready to go into modelling
+  x = data.corr.rm
+
+  ###PCA transformation###
+  if (PCAFlag){
+    print("----------PCA Transformation----------")
+
+    #preform PCA on remaining data set
+    x.pca = princomp(x)
+
+    #summary stats
+    print(summary(x.pca))
+
+    #next, we calculate the cumulative variance seen in the summary
+    cutoff = cumsum(x.pca$sdev^2 / sum(x.pca$sdev^2))
+
+    #This grabs all Comp's/PC's that are less than 'pcPercent' in cumulative variance explained.
+    pcaToKeep = names(cutoff[cutoff<pcPercent])
+    length(pcaToKeep)
+
+    #ouput the number of Comps/PC's we are keeping
+    print(paste("We are keeping up to Comp.",length(pcaToKeep)+1,"/PC",length(pcaToKeep)+1," since these PC's describe ",pcPercent*100,"% of the variance",sep = ""))
+
+    #now lets get all the PC's as a data frame (each column is a PC with the rotations as the rows)
+    #we also clean the original pca to remove those PC's which are of little importance (cumlative proportion < pcPercent)
+    #we then set the original x as the PCA transformed data
+    x = as.data.frame(x.pca$scores[,1:length(pcaToKeep)+1])
+  }
+
+  #split the remaining data in train and test sets
+  #This loop is need as sometimes the split can make a column have 0 variance therefore we keep trying splits
+  #until we get on where the variance of each column can still be observed
+  print("----------Attempting a Train Test Split----------")
+  splitLoop = 0
+  splitLimit = 1000
+  randomSeedIter = randomSeed
+  while (splitLoop<splitLimit) {
+
+    #we can set the user assigned seed if they want to keep the split consistent
+    #we have the if statement so that if the seed provided is a bad split, it only runs the loop once
+    if (!is.null(randomSeedIter)){
+      set.seed(randomSeedIter)
+      randomSeedIter = randomSeedIter + 1
+    }
+
+    #sample the data into a train and test split, if testPercent is -1, we only get one test value
+    if (testPercent == -1) {s = sample(nrow(data.corr.rm),1)} else {s = sample(nrow(data.corr.rm),round(nrow(data.corr.rm)*testPercent))}
+
+    #check that variance is still seen within the training variables
+    tempTrain = var0Remove(x[-s,],print = F)
+
+    #If our training data still has variance, end the loop
+    if (ncol(x) == ncol(tempTrain)){
+      print("Good train, test split found")
+      splitLoop = splitLimit*2
+    } else {splitLoop = splitLoop + 1}
+
+  }
+
+  #In the case where a good train test split can't be found, we must throw an error
+  if (splitLoop >= splitLimit & splitLoop < 1500) {
+    stop("No good Train Test split was found, please try increasing 'obsPerLevel', 'naPercent' or changing 'randomSeed' if it was set and try again")
+  }
+
+  #report back the seed if the given seed didn't work
+  if (!is.null(randomSeedIter)) {print(paste("The working seed found was",randomSeedIter - 1))}
+
+  #now we have a stable split, we can split the y and x data
+  y.test = as.matrix(y[s,])
+  y.train = as.matrix(y[-s,])
+
+  x.test = as.matrix(x[s,])
+  x.train = as.matrix(x[-s,])
+
+  ###kNN###
+  print("----------kNN----------")
+
+  #Here we make the kNN model, takes train and test data. Function uses the train data so that for each test point
+  #kNNCount train neighbors are considered for classification
+  set.seed(randomSeed) #need to set seed here so that the kNN choose the same neighbours if set
+  prT = knn(x.train, x.test, cl=y.train, k=kNNCount)
+
+  #this is making the data which can be returned to the user to use for further kNN study
+  kNNTrainData = as.data.frame(cbind(y.train, x.train))
+  names(kNNTrainData)[1] = "y"
+
+  #now lets make a table between the kNN results and the y.test data to see how well it has predicted
+  #we rename the data here just for the data output, not the best way since it creates new variables
+  predicted = prT
+  real = y.test
+  kNNTablePre = table(predicted,real)
+
+  #storing as data.frame for output
+  resultsDataF = as.data.frame(kNNTablePre)
+  names(resultsDataF) = c("predicted","real","freq")
+  resultsDataF$predicted = as.numeric(levels(resultsDataF$predicted))[resultsDataF$predicted] #needed to maintain levels
+  resultsDataF$real = as.numeric(levels(resultsDataF$real))[resultsDataF$real]
+
+  #getting the error per prediction
+  resultsDataF$error = (resultsDataF$predicted - resultsDataF$real)
+
+  #output the k in kNN (the number of neighbours)
+  print(paste(kNNCount,"neighbours considered for each test data point"))
+
+  #output results table
+  print("kNN results as a table, follow the diagonal for the correctly mapped clusters")
+  print(kNNTablePre)
+
+  #get the MSE of the predictions
+  print("CAUTION: Be careful comparing the MSE of this classification model to the regression models")
+  print(paste("The MSE of the predicted values are of",round(sum(resultsDataF$error^2)/sum(resultsDataF$freq),4),sep=" "))
+
+  #generate the accuracy, done this way because the diag of the predictiosn table sometimes doesn't state the correct
+  #predictions
+  accuracyS = 0
+  for (i in 1:nrow(resultsDataF)){
+    if (resultsDataF$error[i] == 0){ accuracyS = accuracyS + resultsDataF$freq[i]}
+  }
+
+  #print results
+  print(paste("The kNN model predicts exactly with an accuracy of",round(accuracyS/sum(resultsDataF$freq),4),sep=" "))
+
+  ###CART###
+  print("----------CART prediction model----------")
+  #Here we fit our CART model and print the summary
+  x.data.cart = x.train
+  cartModel = rpart(y.train ~ x.data.cart)
+
+  #here we remove the data-frame name from the variables
+  cartModel$frame$var = str_remove(cartModel$frame$var,"x.data.cart")
+  names(cartModel$variable.importance) = str_remove(names(cartModel$variable.importance),"x.data.cart")
+
+  #output the CART model
+  print(cartModel)
+
+  #output the variance importance
+  print("Variable Importance")
+  print(cartModel$variable.importance)
+
+  #quirk of the prediction function, need to rename the data-frame to the name used to build the model
+  x.data.cart = x.test
+
+  #here we get the predictions using the model
+  predictionsCART = as.data.frame(predict(cartModel, as.data.frame(x.data.cart), interval = 'confidence'))
+  names(predictionsCART) = c("fit")
+
+  #add in the real y
+  predictionsCART$real = y.test
+
+  #Add in the error between the predicted and real
+  predictionsCART$error = predictionsCART$fit - predictionsCART$real
+
+  #calculations on the MSE of the model, ask about which one is best
+  print(paste("The MSE of the predicted values are of",round(mean(predictionsCART$error^2),4),sep=" "))
+
+  #accuracy based on exact prediction rounded
+  exactAcc = sum(round(predictionsCART$fit,0) == predictionsCART$real)/length(predictionsCART$fit)
+  print(paste("The CART model predicts exactly with accuracy of",round(exactAcc,4),sep=" "))
+
+  ###Ordinary Linear Regression###
+  print("----------Ordinary Linear Regression (Initial)----------")
+
+  #First lets do a basic multivariate Ordinary Linear Regression
+  #making our initial regression model
+  multiModel = lm(y.train ~ x.train)
+
+  #removing the matrix name from the coef names
+  names(multiModel$coefficients) = str_replace(names(multiModel$coefficients),"x.train","")
+
+  #For now we will remove any leftover NA vars from the model since we have done checks for all the above issues
+  multiModel.data = tidy(multiModel)
+  multiModel.data = na.omit(multiModel.data[-1,]) #removes the intercept and NA predictors from the list to be checked
+
+  #removes the NA vars from x.data
+  x.data.linear = subset(x.train, select = multiModel.data$term)
+  x.test.clean = subset(x.test, select = multiModel.data$term)
+
+  #for the VIF functions to work, we need our dependent variable within our x.data dataframe
+  x.data.linear = cbind(x.data.linear,y.train)
+  dimnames(x.data.linear)[2][[1]][ncol(x.data.linear)] = "y"
+
+  #repeat for the test data
+  x.test.clean = cbind(x.test.clean,y.test)
+  dimnames(x.test.clean)[2][[1]][ncol(x.test.clean)] = "y"
+
+  #get the AIC of the full model
+  print(paste("The full model AIC is:",round(AIC(multiModel),4)))
+
+  #Now to do a VIF check on the variables in the OLS model
+  print("----------Variance Inflation Factor Removal----------")
+  iterV = 0
+
+  #need to make the initial vif scores of the full model
+  vifModel = vif(lm(y ~ ., data = as.data.frame(x.data.linear)))
+
+  #if the VIF can't be calculated, we throw an error
+  if(is.na(max(vifModel))) {
+    stop("VIF can't be calculated since there is too much multi-collinearity in the model, please lower 'corrConfLevel' and try again")
+  }
+
+  #here we have a loop where we remove variables based on maximum VIF score until all are removed
+  while (max(vifModel) > vifSelectionLevel){
+
+    #get the name of the column that should be removed
+    colRemoved = vifModel[vifModel == max(vifModel)]
+
+    #remove this column from the x.train data
+    x.data.linear = x.data.linear[,colnames(x.data.linear) != names(colRemoved)]
+
+    #we may have to transpose and cast as matrix since if testPercent = -1, having 1 observation changes the data type of this matrix
+    if (nrow(x.test.clean) == 1) { x.test.clean = t(as.matrix(x.test.clean[,colnames(x.test.clean) != colRemoved])) } else {
+      x.test.clean = x.test.clean[,colnames(x.test.clean) != colRemoved]
+    }
+
+    #progress marker
+    iterV = iterV+1
+    print(paste("The variable", names(colRemoved),"was removed since it had a VIF score of", round(colRemoved[[1]],4)))
+
+    #generate the VIF scores for the full model
+    vifModel = vif(lm(y ~ ., data = as.data.frame(x.data.linear)))
+
+  }
+
+  #print results from the VIF stage
+  print(paste(iterV,"variables removed from the Ordinary Linear Model since they have a VIF score higher than",vifSelectionLevel))
+
+  #have a look at the model AIC after VIF checks
+  print(paste("The full model AIC after VIF checks is:",round(AIC(lm(y ~ ., data = as.data.frame(x.data.linear))),4)))
+
+  #setting up progress marker
+  print("----------Backwards Selection----------")
+  iterA = 0
+
+  #need this to store the length of the data-set before backwards selection
+  lengthT = nrow(multiModel.data)
+
+  #backwards selection
+  #our method: remove least significant variable, re-make model, repeat. Stopping criteria: all variables are significant
+
+  #storing the columns removed in data-frame for output later
+  rmNames = c()
+
+  while (max(multiModel.data$p.value) > (1 - modelSigLevel) ) {
+    #get the column name of the variable with the least correlation/ highest p-value
+    colRemoved = str_remove(toString(multiModel.data[which.max(multiModel.data$p.value),1]),"x.data.linear")
+
+    #adding the name to the vector for output
+    rmNames = c(rmNames,colRemoved)
+
+    #remove this column from the x.train data
+    x.data.linear = x.data.linear[,colnames(x.data.linear) != colRemoved]
+    if (nrow(x.test.clean) == 1) { x.test.clean = t(as.matrix(x.test.clean[,colnames(x.test.clean) != colRemoved])) } else {
+      x.test.clean = x.test.clean[,colnames(x.test.clean) != colRemoved]
+    }
+
+    #re-fit the model
+    multiModel = lm(y ~ ., data = as.data.frame(x.data.linear))
+
+    #removing the matrix name from the coef names
+    names(multiModel$coefficients) = str_replace(names(multiModel$coefficients),"x.data","")
+    multiModel.data = tidy(multiModel)
+
+    #We don't want to check the intercept for this backward selection so we remove from the list of options
+    multiModel.data = multiModel.data[-1,]
+
+    #progress marker
+    iterA = iterA+1
+
+    #print progress every 50 variables
+    if ((iterA %% 50) == 0){
+      print(paste(toString(iterA)," out of ",toString(lengthT)," variables removed so far.",sep=""))
+    }
+
+  }
+
+  #report back the results of the backwards selection
+  print(paste(toString(iterA)," out of ",toString(lengthT)," variables removed in backwards selection since they weren't significant at the ",modelSigLevel*100,"% confidence level",sep=""))
+
+  #output names of the regression
+  print(rmNames)
+
+  print("----------Ordinary Linear Regression (Improved)----------")
+  #set and have a look at the final linear model
+  multiModelFinal = multiModel
+  print(summary(multiModelFinal))
+  cat(paste("AIC:",round(AIC(multiModelFinal),4)))
+  cat(paste("\nMSE:",round(mean(multiModelFinal$residuals^2),4),"\n"))
+
+  #now we can make some predictions using the test data
+  #the below step is needed just so we can use the predict function (quirk of the func)
+  x.data.linear = x.test.clean
+  colnames(x.test.clean) = colnames(x.data.linear)
+
+  #Now we can put the predictions into a data-frame
+  predictionsLinear = as.data.frame(predict(multiModelFinal, as.data.frame(x.data.linear), interval = 'confidence'))
+
+  #add in the real y
+  predictionsLinear$real = y.test
+
+  #Add in the error between the predicted and real
+  predictionsLinear$error = predictionsLinear$fit - predictionsLinear$real
+
+  #calculations on the MSE of the model, ask about which one is best
+  print(paste("The MSE of the predicted values are of",round(mean(predictionsLinear$error^2),4),sep=" "))
+
+  #accuracy based on exact prediction rounded
+  exactAcc = sum(round(predictionsLinear$fit,0) == predictionsLinear$real)/length(predictionsLinear$fit)
+  print(paste("The Linear Model predicts exactly with accuracy of",round(exactAcc,4),sep=" "))
+
+  #accuracy based on being within the confidence interval rounded
+  intervalAcc = sum(predictionsLinear$real >= round(predictionsLinear$lwr,0) & predictionsLinear$real <= round(predictionsLinear$upr,0))/length(predictionsLinear$fit)
+  print(paste("The Linear Model predicts within a confidence interval with accuracy of",round(intervalAcc,4),sep=" "))
+
+  ###Elastic Net Regression (includes Ridge and Lasso in theory)###
+  print("----------Elastic Net Regression----------")
+  #Now we are going to loop though different values of alpha to find our best fit
+  #alpha = 0 is ridge regression
+  #alpha = 1 is lasso regression
+  #0 < alpha < 1 is elastic net
+
+  #the below loop creates the fits for each alpha (decided by the elasticCount)
+  list.of.fits = list()
+
+  #if wanted, we can add a progress bar to the fitting procedure like so
+  #glmnet.control(itrace = 0)
+
+  #loop for fitting all models for each alpha
+  for (i in 0:elasticCount) {
+
+    fit.name = paste0("alpha", i/elasticCount)
+
+    set.seed(randomSeed) #This is set here since the lambda value in each fold is choosen randomly
+
+    #by default, we do 10-fold cross validation to get our lambda value for each fit
+    list.of.fits[[fit.name]] = cv.glmnet(x.train, y.train, type.measure="mse", alpha=i/elasticCount, family="gaussian")
+  }
+
+  #now we calculate the models per alpha value generated
+  #predicting the values in the Testing data-set.
+  results = data.frame()
+  for (i in 0:elasticCount) {
+    fit.name = paste("alpha", i/elasticCount,sep="")
+
+    #use each model to predict 'y' given the test data set
+    predicted = predict(list.of.fits[[fit.name]], s=list.of.fits[[fit.name]]$lambda.min, newx=x.test)
+
+    #calculate the Mean Squared Error of the predicted values
+    mse = mean((y.test - predicted)^2)
+
+    #calculate the R^2 value
+    r2 = cor(y.test, predicted)^2
+
+    #store the results
+    temp = data.frame(alpha=i/elasticCount, mse=mse, r2=r2, fit.name=fit.name)
+    results = rbind(results, temp)
+  }
+
+  #naming issue with results data-frame, have to have this one line to clear up
+  colnames(results)[3] = "R^2"
+
+  #view the results
+  results
+
+  #we can then pick the best model from the tests
+  #get the best fit name by lowest mse value (fits in line with how our models were fitted for each alpha)
+  bestFitName = toString(results[which.min(results$mse),4])
+  bestFitMSE = toString(results[which.min(results$mse),2])
+  bestFitAlpha = toString(results[which.min(results$mse),1])
+
+  #coefficients of the last alpha value (so lasso since alpha = 1)
+  #To show only variables which were considered significant in the model, we have to do some transformation
+  #first getting the significant coefficients
+  elasSumm = summary(coef(list.of.fits[[bestFitName]]))
+
+  #then here we are getting the names of all the predictor variables considered for the model
+  namesHold = as.data.frame(dimnames(coef(list.of.fits[[bestFitName]]))[1])
+
+  #now a setup for a for loop that goes though and matches the index of names in 'namesHold' to the i within the 'ElasSumm'
+  names(namesHold)[1] = "names"
+  elasSumm$names = NA
+  names(elasSumm) = c("iter1","iter2","val","names")
+  iterB = 1
+  for (i in 1:nrow(namesHold)) {
+    if (i == elasSumm$iter1[iterB]) {
+      elasSumm$names[iterB] = namesHold$names[i]
+      iterB = iterB + 1
+      if (iterB > nrow(elasSumm)) #This if is needed since the iterator counts above the amount if last var found
+        break
+    }
+  }
+
+  #lastly, cleaning up the results then printing
+  elasSumm$Estimate_Coefs = elasSumm$val
+  elasSumm$iter1 = NULL
+  elasSumm$iter2 = NULL
+  elasSumm$val = NULL
+  print(elasSumm)
+
+  #MSE of the best fit
+  print(paste("The MSE of the predicted values of the best fit model is",round(as.numeric(bestFitMSE),4),sep=" "))
+
+  #Alpha of the best fit
+  print(paste("The Alpha of the best fit model is",bestFitAlpha,sep=" "))
+
+  #get the best fit
+  bestFit = list.of.fits[[bestFitName]]
+
+  #generate a predict return sheet
+  predictElastic = as.data.frame(predict(bestFit, s=bestFit$lambda.min, newx = x.test))
+
+  #changing name to fall in line with Ordinary Linear Regression predictions sheet
+  names(predictElastic)[1] = "fit"
+
+  #add in real values
+  predictElastic$real = y.test
+
+  #accuracy based on exact prediction rounded
+  exactAccElastic = sum(round(predictElastic$fit,0) == predictElastic$real)/length(predictElastic$fit)
+  print(paste("The Elastic Net Model predicts exactly with accuracy of",round(exactAccElastic,4),sep=" "))
+
+  #now to make the return object, we have multiple things we want to return in a list
+  returnList = list(data.corr.rm,
+                    list(kmClus,resultsTable),
+                    list(kNNTrainData, resultsDataF),
+                    list(cartModel,predictionsCART),
+                    list(multiModel, predictionsLinear),
+                    list(results, bestFit, predictElastic))
+
+  #setting the names of the list for better user reabale results
+  names(returnList) = c("cleanData",
+                        "kMeansResults",
+                        "kNNResults",
+                        "cartResults",
+                        "linearRegression",
+                        "elasticNetRegression")
+
+  #setting inner names
+  names(returnList$kMeansResults) = c("model","predictions")
+  names(returnList$kNNResults) = c("trainingData","predictions")
+  names(returnList$cartResults) = c("model","predictions")
+  names(returnList$linearRegression) = c("model","predictions")
+  names(returnList$elasticNetRegression) = c("listOfFits","model","predictions")
+
+  #lastly, we stop the timer and report back the run times
+  print("----------Timer Results----------")
+  print(proc.time() - timer)
+
+  return(returnList)
+
+}
