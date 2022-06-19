@@ -1,13 +1,15 @@
 # automodel
 Hello, welcome to the README! Made by Robbie Mowforth
 
-This function is designed to automate the analysis process within the coding language R. The use case of this function is primailiry for intital analysis on a dataset. Results from the fucntion should not be considered final 'best' models of the data and instead used as a guiding tool for futher in-depth analysis
+This function is designed to automate the analysis process within the coding language R. The use case of this function is primailiry for intital analysis on a dataset. Results from the fucntion should not be considered final 'best' models of the data and instead used as a guiding tool for futher in-depth analysis.
 
 # Running the Code
 
 To run the code correctly, please do the following:
 
-1. open up the "runningexample.Rproj" file in R Studio (can be done by clicking on the file)
+1. Download the zip or clone this repository to a machine that has R and R Studio installed (due to the use of .Rproj files for simplicity)
+
+1. locate the repository on your machine and open up the "runningexample.Rproj" file in R Studio (can be done by clicking on the file)
 
 2. Navigate to the "Files" tab in the mid-left on R-Studio
 
