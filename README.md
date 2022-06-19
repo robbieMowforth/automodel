@@ -35,7 +35,7 @@ You can then view the code used to madke the autoModel function (and the Roxygen
 
 # Downloading Understanding Society Data (found within mainRun.R)
 
-Since the Understanding Society data files are so large, a manaual download of then is going to be required.
+Since the Understanding Society data files are so large (and are security protected), a manaual download of then is going to be required.
 
 To access the Wave 2 and 3 survey data, please go to the following link: https://beta.ukdataservice.ac.uk/datacatalogue/studies/study?id=6614
 To access the Nurse Visit data, please go to the following link: https://beta.ukdataservice.ac.uk/datacatalogue/studies/study?id=7251
