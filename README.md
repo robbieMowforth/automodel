@@ -1,7 +1,7 @@
 # automodel
 Hello, welcome to the README! Made by Robbie Mowforth
 
-This function is designed to automate the analysis process within the coding language R. The function used for automation is within the script 'automodel.R'and can be found within the directory 'automodel' or the zip folder 'automodel.zip'.
+This function is designed to automate the analysis process within the coding language R. The use case of this function is primailiry for intital analysis on a dataset. Results from the fucntion should not be considered final 'best' models of the data and instead used as a guiding tool for futher in-depth analysis
 
 # Running the Code
 
